@@ -1,0 +1,260 @@
+---
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE)
+```
+
+### Geschlechterstereotype in Bilderkennungssystemen – <br> Replikationsstudie eines Algorithmenaudits
+
+#### Philipp Penner 
+#### Matr.-Nr.: 4322128
+#### Datum: 27.03.2023
+#### R-Version: 4.0.2
+<br>
+
+```{r message=FALSE, warning=FALSE}
+# install.packages("imgrec")
+library(imgrec)
+library(tidyverse)
+library(quanteda)
+library(tidytext)
+library(scales)
+library(viridis)
+library(readr)
+library(extrafont)
+library(hrbrthemes)
+
+loadfonts()
+#theme_set(theme_ipsum(base_size = 14,
+#                      axis_title_size = 14,
+#                    grid = 'XY'))
+```
+
+#### Preparations to use Google Cloud Vision API
+```{r}
+# store & hide GCV API key in .Renviron file
+#usethis::edit_r_environ()
+```
+
+```{r}
+# API key set as environment variable
+Sys.setenv(gvision_key = Sys.getenv('GCV_key'))
+```
+
+```{r}
+# initialization function 
+gvision_init()
+```
+
+#### Get image annotations
+#### Separately for women and men
+```{r}
+# get list of paths to the images
+filenames_woman <- list.files(path = "mc_images_split/mc_woman", 
+                        pattern="*.jpg", 
+                        full.names = TRUE)
+head(filenames_woman)
+```
+
+```{r}
+# get list of paths to the images
+filenames_men <- list.files(path = "mc_images_split/mc_men", 
+                        pattern="*.jpg", 
+                        full.names = TRUE)
+head(filenames_men)
+```
+
+#### Send post request to GCV-API
+```{r eval=FALSE}
+results_woman <- get_annotations(images = filenames_woman,  # image character vector
+                           features = 'label',              # request all available features
+                           max_res = 25,                    # maximum number of results per feature
+                           mode = 'local')                  # determine image type
+
+img_data_woman <- parse_annotations(results_woman) # returns list of data frames
+names(img_data_woman) # all available features
+```
+
+
+```{r eval=FALSE}
+results_men <- get_annotations(images = filenames_men,      # image character vector
+                           features = 'label',              # request all available features
+                           max_res = 25,                    # maximum number of results per feature
+                           mode = 'local')                  # determine image type
+
+img_data_men <- parse_annotations(results_men) # returns list of data frames
+names(img_data_men) # all available features
+```
+
+#### Get all labels
+```{r eval=FALSE}
+img_labels_woman <- img_data_woman$labels
+head(img_labels_woman)
+```
+
+```{r eval=FALSE}
+img_labels_men <- img_data_men$labels
+head(img_labels_men)
+```
+
+```{r eval=FALSE}
+# save data
+write.csv(img_labels_woman, 
+          file = "data_replication/imgrec_women_18.01.23.csv", 
+          row.names = F)
+```
+
+```{r eval=FALSE}
+# save data
+write.csv(img_labels_men, 
+          file = "data_replication/imgrec_men_18.01.23.csv", 
+          row.names = F)
+```
+
+#### Import collected data for more detailed analysis
+```{r}
+df_woman <- read_csv("data_replication/imgrec_women_18.01.23.csv")
+df_men   <- read_csv("data_replication/imgrec_men_18.01.23.csv")
+```
+
+#### Data preparation
+```{r}
+head(df_woman)
+df_woman <- aggregate(description ~ img_id, data = df_woman, FUN = c)
+df_woman <- df_woman %>% add_column(gender = "Female", .before = "description")
+```
+
+```{r}
+head(df_men)
+df_men <- aggregate(description ~ img_id, data = df_men, FUN = c)
+df_men <- df_men %>% add_column(gender = "Male", .before = "description")
+```
+
+```{r}
+df_total <- full_join(df_woman, df_men)
+dim(df_total)
+```
+
+
+```{r}
+# recode description
+df_total$description <- sapply(df_total$description, paste, collapse = ", ")
+```
+
+
+#### Image labels - get key differences
+
+Next, we quantify key differences in labels by gender for each image recognition service. We only consider labels that were assigned at least 5 times across all images.
+
+```{r}
+gcv_dfm <- corpus(df_total,
+                  text_field = 'description',
+                  docid_field = 'img_id') %>%
+  dfm(remove_punct = TRUE) %>% 
+  dfm_trim(min_termfreq = 5)
+
+dim(gcv_dfm)
+```
+
+
+We create a function to examine group differences based on Chi² tests. 
+Get 25 most gendered labels.
+
+```{r}
+key_diff <- function(featmat, groups, 
+                     groups1_name,
+                     groups2_name,
+                     group1_obs, group2_obs) {
+  # grouping
+  img_grouped <- dfm_group(featmat, groups = groups)
+  
+  
+  # compute key labels for group 1
+  key1 <- textstat_keyness(img_grouped,  target = groups1_name, measure = 'chi2')
+  group_key1 <-
+  key1 %>% mutate(
+    groups = if_else(chi2 >= 0, groups1_name, groups2_name),
+    key = groups1_name,
+    chi2_abs = abs(chi2),
+    obs_total = group1_obs
+  ) %>%
+  group_by(groups) %>% top_n(n = 25, wt = chi2_abs) %>% ungroup()
+
+  # compute key labels for group 2
+  key2 <- textstat_keyness(img_grouped,  target = groups2_name, measure = 'chi2')
+  group_key2 <-
+  key2 %>% mutate(
+    groups = if_else(chi2 >= 0, groups2_name, groups1_name),
+    key = groups2_name,
+    chi2_abs = abs(chi2),
+    obs_total = group2_obs
+  ) %>%
+  group_by(groups) %>% top_n(n = 25, wt = chi2_abs) %>% ungroup()
+  
+  
+  # combine data and add frequency indicators
+comb_key <- group_key1 %>% bind_rows(group_key2) %>%
+  mutate(sum_feat = n_target + n_reference,
+    rel_feat =  n_target / sum_feat,
+    rel_total =  n_target / obs_total,
+    feature = str_replace_all(feature, '_', ' ') %>% 
+              str_trim() %>% 
+              reorder_within(sum_feat, groups))
+
+return(comb_key)
+
+}
+```
+
+
+#### Visualize the results of GCV
+
+Figure with top labels of woman/man
+
+```{r fig.height=6, fig.width=8}
+# apply function
+gcv_diff <- key_diff(gcv_dfm, groups = "gender", groups1_name = "Female",
+         groups2_name = "Male", group1_obs = 110, group2_obs = 430)
+
+# visualize results
+gcv_diff_plot <- gcv_diff %>%
+  ggplot(aes(x = feature, rel_total, fill = key)) +
+  geom_bar(stat = "identity", position = "dodge")  +
+  coord_flip() +
+  facet_wrap(ifelse(groups == "Male", "Top labels,\nimages of men",
+                    "Top labels,\nimages of women") ~ .,
+              scales = 'free_y')  +
+  
+  scale_x_reordered() +
+  scale_y_continuous(labels = scales::label_percent(suffix = ""),
+                     breaks = pretty_breaks(n = 5)) +
+  
+  scale_fill_manual(
+    values = viridis(n = 4)[c(1, 3)],
+    name = "% receiving each label",
+    labels = c("Women", "Men")
+  )  +
+  labs(x = '',
+       y = '') + 
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.box.background = element_rect(colour = "grey80"),
+    legend.text = element_text(size = 10),
+    axis.text.x = element_text(angle = 0),
+    axis.text.y = element_text(size = 10),
+    strip.text.x = element_text(size = 12),
+    axis.title.y = element_blank())
+
+gcv_diff_plot
+
+ggsave(
+ 'figures/fig6_replication.png',
+ gcv_diff_plot,
+ dpi = 300,
+ width = 8,
+ height = 6
+)
+```
