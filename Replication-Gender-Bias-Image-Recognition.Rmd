@@ -1,167 +1,184 @@
 ---
-output: html_document
+title: "Gender stereotypes in image recognition systems - Replication study of an algorithm audit"
+date: "10.10.2023"
+author: "Author: Philipp Penner <br><br>Based on the analysis of Carsten Schwemmer and Emily D. Bello-Pardo - Replication Data for: Diagnosing Gender Bias in Image Recognition Systems https://doi.org/10.7910/DVN/2CEYWV"
+output: 
+  html_document:
+    fig_height: 6
+    fig_width: 9
+    highlight: zenburn
+    theme: readable
+    toc: yes
+    toc_depth: 2
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+    number_sections: true
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, eval = TRUE)
-```
+# Introduction
+This script is divided into the analysis of the original study and the analysis of the replication study. Slight adjustments and extensions were made in the script of the original study. The reasons for the adjustments and extensions can be found in the written elaboration. 
 
-### Geschlechterstereotype in Bilderkennungssystemen – <br> Replikationsstudie eines Algorithmenaudits
+For intersubjective traceability, all materials used in the replication study can be viewed in a GitHub repository. All R scripts, datasets, and figures are available at the following link:
 
-#### Philipp Penner 
-#### Matr.-Nr.: 4322128
-#### Datum: 27.03.2023
-#### R-Version: 4.0.2
-<br>
+https://github.com/Philipp-D-P/Replication-Gender-Bias-Image-Recognition
 
+
+# Software Setup
+
+We use the following R packages and versions throughout the document:
 ```{r message=FALSE, warning=FALSE}
-# install.packages("imgrec")
-library(imgrec)
+library(MASS)
 library(tidyverse)
-library(quanteda)
-library(tidytext)
-library(scales)
-library(viridis)
-library(readr)
 library(extrafont)
+library(sjPlot)
+library(magick)
+library(ggrepel)
+library(cowplot)
+library(ggeffects)
+library(effects)
 library(hrbrthemes)
+library(stargazer)
+library(lubridate)
+library(tidytext)
+library(quanteda)
+library(AER)
+library(viridis)
+library(scales)
+library(DescTools)
+library(imgrec)
+library(stargazer)
+library(mfx)
+library(statmod)
+
 
 loadfonts()
-#theme_set(theme_ipsum(base_size = 14,
-#                      axis_title_size = 14,
-#                    grid = 'XY'))
+theme_set(theme_ipsum(base_size = 14,
+                      axis_title_size = 14,
+                      grid = 'XY'))
+sessionInfo()
 ```
 
-#### Preparations to use Google Cloud Vision API
+# Original
+
+## Data Import and Overview
+
+First, we load data of MCs and image annotations for their professional photographs which we extracted from their Wikipedia pages.
+```{r message=FALSE, warning=FALSE}
+mc_df <- read_tsv("data/mc_data.tsv")
+head(mc_df)
+```
+
+The following chunk provides some descriptive statistics about the composition of this dataset. 
 ```{r}
-# store & hide GCV API key in .Renviron file
-#usethis::edit_r_environ()
+mc_df %>% count(party)
+mc_df %>% filter(party == "Independent")
+mc_df %>% count(gender)
+mean(mc_df$age)
+mc_df %>% group_by(gender) %>% summarise(age = mean(age))
+summary(mc_df$age)
+prop.table(table(mc_df$party)) * 100
 ```
 
+As we see above, there are `r mc_df %>% filter(party=="Democrat") %>% count(party) %>% pull(n)` Democrats, `r mc_df %>% filter(party=="Republican") %>% count(party) %>% pull(n)` Republicans, and `r mc_df %>% filter(party=="Independent") %>% count(party) %>% pull(n)` Independents. There are `r mc_df %>% filter(gender=="Female") %>% count(gender) %>% pull(n)` women and `r mc_df %>% filter(gender=="Male") %>% count(gender) %>% pull(n)` men. The average age in this dataset is `r round(mean(mc_df$age), digits=2)`, with the average age among women being `r mc_df %>% filter(gender=="Female") %>% summarise(age = round(mean(age), digits=2))` and the average age among men being `r mc_df %>% filter(gender=="Male") %>% summarise(age = round(mean(age), digits=2))`.
+
+Get total number of labels
 ```{r}
-# API key set as environment variable
-Sys.setenv(gvision_key = Sys.getenv('GCV_key'))
+
+# Function to count the total number of words in the column
+total_word_count <- sum(sapply(mc_df$wiki_img_labels, function(text) length(strsplit(text, ", ")[[1]])))
+
+# Show total number of words
+print(total_word_count)
+
+# Number of labels for each person/image
+total_word_count/540
 ```
 
+## Annotation examples
+
+In the following, we provide examples of image annotations by Google Cloud Vision (GCV).
+
+### GCV Example
+
+```{r fig.height=5.3, fig.width=8, message=FALSE, warning=FALSE}
+# filtering and reshaping data
+img_example1 <-
+  mc_df %>% filter(str_detect(wiki_img_url, 'Steve_Daines|Lucille_Roybal')) %>%
+  mutate(label = str_split(wiki_img_labels, ', '),
+         score = str_split(wiki_img_labelsconf, ', ')) %>%
+  unnest(c(label, score)) %>%
+  mutate(score = round(as.numeric(score), 2)) %>%
+  group_by(name) %>%
+  mutate(pixel = score * 200) %>% # for visulization purposes
+  dplyr::select(name, gender, party, label, score, pixel, wiki_img_url)
+
+# creating plot
+daines <-
+  image_read('mc_images/Steve_Daines.jpg') %>% 
+  image_ggplot() +
+  
+  geom_label_repel(
+    data = img_example1 %>% filter(name == 'Steve Daines'),
+    aes(
+      y = pixel - 90 ,
+      x =  110,
+      label = str_c(label, ': ', percent(score, accuracy = 2))
+    ),
+    direction = 'both',
+    force = 20,
+    segment.alpha = 0.00,
+    size = 5,
+    alpha = 0.75,
+    seed = 2
+  ) + guides(size = FALSE)  
+
+
+# creating plot
+allard <- image_read('mc_images/Lucille_Roybal-Allard.jpg') %>%
+  image_ggplot() +
+  
+  geom_label_repel(
+    data = img_example1 %>% filter(name == 'Lucille Roybal-Allard'),
+    aes(
+      y = pixel - 90 ,
+      x =  90,
+      label = str_c(label, ': ', percent(score,  accuracy = 2))
+    ),
+    direction = 'both',
+    force = 5,
+    segment.alpha = 0.00,
+    size = 5,
+    alpha = 0.75,
+    seed = 1337
+  ) + guides(size = FALSE)
+
+# combining plots
+comb1 <- cowplot::plot_grid(daines, allard, labels = NULL)
+comb1
+
+# ggsave(
+#  'figures/example_annotations.png',
+#  comb1,
+#  dpi = 300,
+#  width = 8,
+#  height = 5.3
+# )
+```
+## Image labels - key differences
+
+Next, we quantify key differences in labels by gender for GCV. We only consider labels that were assigned at least 5 times across all images.
 ```{r}
-# initialization function 
-gvision_init()
-```
-
-#### Get image annotations
-#### Separately for women and men
-```{r}
-# get list of paths to the images
-filenames_woman <- list.files(path = "mc_images_split/mc_woman", 
-                        pattern="*.jpg", 
-                        full.names = TRUE)
-head(filenames_woman)
-```
-
-```{r}
-# get list of paths to the images
-filenames_men <- list.files(path = "mc_images_split/mc_men", 
-                        pattern="*.jpg", 
-                        full.names = TRUE)
-head(filenames_men)
-```
-
-#### Send post request to GCV-API
-```{r eval=FALSE}
-results_woman <- get_annotations(images = filenames_woman,  # image character vector
-                           features = 'label',              # request all available features
-                           max_res = 25,                    # maximum number of results per feature
-                           mode = 'local')                  # determine image type
-
-img_data_woman <- parse_annotations(results_woman) # returns list of data frames
-names(img_data_woman) # all available features
-```
-
-
-```{r eval=FALSE}
-results_men <- get_annotations(images = filenames_men,      # image character vector
-                           features = 'label',              # request all available features
-                           max_res = 25,                    # maximum number of results per feature
-                           mode = 'local')                  # determine image type
-
-img_data_men <- parse_annotations(results_men) # returns list of data frames
-names(img_data_men) # all available features
-```
-
-#### Get all labels
-```{r eval=FALSE}
-img_labels_woman <- img_data_woman$labels
-head(img_labels_woman)
-```
-
-```{r eval=FALSE}
-img_labels_men <- img_data_men$labels
-head(img_labels_men)
-```
-
-```{r eval=FALSE}
-# save data
-write.csv(img_labels_woman, 
-          file = "data_replication/imgrec_women_18.01.23.csv", 
-          row.names = F)
-```
-
-```{r eval=FALSE}
-# save data
-write.csv(img_labels_men, 
-          file = "data_replication/imgrec_men_18.01.23.csv", 
-          row.names = F)
-```
-
-#### Import collected data for more detailed analysis
-```{r}
-df_woman <- read_csv("data_replication/imgrec_women_18.01.23.csv")
-df_men   <- read_csv("data_replication/imgrec_men_18.01.23.csv")
-```
-
-#### Data preparation
-```{r}
-head(df_woman)
-df_woman <- aggregate(description ~ img_id, data = df_woman, FUN = c)
-df_woman <- df_woman %>% add_column(gender = "Female", .before = "description")
-```
-
-```{r}
-head(df_men)
-df_men <- aggregate(description ~ img_id, data = df_men, FUN = c)
-df_men <- df_men %>% add_column(gender = "Male", .before = "description")
-```
-
-```{r}
-df_total <- full_join(df_woman, df_men)
-dim(df_total)
-```
-
-
-```{r}
-# recode description
-df_total$description <- sapply(df_total$description, paste, collapse = ", ")
-```
-
-
-#### Image labels - get key differences
-
-Next, we quantify key differences in labels by gender for each image recognition service. We only consider labels that were assigned at least 5 times across all images.
-
-```{r}
-gcv_dfm <- corpus(df_total,
-                  text_field = 'description',
-                  docid_field = 'img_id') %>%
+gcv_dfm <- corpus(mc_df,
+                  text_field = 'wiki_img_labels',
+                  docid_field = 'wikipedia_id') %>%
   dfm(remove_punct = TRUE) %>% 
   dfm_trim(min_termfreq = 5)
 
 dim(gcv_dfm)
 ```
 
-
 We create a function to examine group differences based on Chi² tests. 
-Get 25 most gendered labels.
-
 ```{r}
 key_diff <- function(featmat, groups, 
                      groups1_name,
@@ -209,10 +226,9 @@ return(comb_key)
 ```
 
 
-#### Visualize the results of GCV
+### GCV
 
-Figure with top labels of woman/man
-
+25 most gendered labels:
 ```{r fig.height=6, fig.width=8}
 # apply function
 gcv_diff <- key_diff(gcv_dfm, groups = "gender", groups1_name = "Female",
@@ -223,8 +239,8 @@ gcv_diff_plot <- gcv_diff %>%
   ggplot(aes(x = feature, rel_total, fill = key)) +
   geom_bar(stat = "identity", position = "dodge")  +
   coord_flip() +
-  facet_wrap(ifelse(groups == "Male", "Top labels,\nimages of men",
-                    "Top labels,\nimages of women") ~ .,
+  facet_wrap(ifelse(groups == "Male", "Häufigste Labels,\nBilder von Männern",
+                    "Häufigste Labels,\nBilder von Frauen") ~ .,
               scales = 'free_y')  +
   
   scale_x_reordered() +
@@ -233,8 +249,8 @@ gcv_diff_plot <- gcv_diff %>%
   
   scale_fill_manual(
     values = viridis(n = 4)[c(1, 3)],
-    name = "% receiving each label",
-    labels = c("Women", "Men")
+    name = "Relative Anteil der Labels nach Geschlecht in Prozent",
+    labels = c("Frauen", "Männer")
   )  +
   labs(x = '',
        y = '') + 
@@ -250,11 +266,1287 @@ gcv_diff_plot <- gcv_diff %>%
 
 gcv_diff_plot
 
+# ggsave(
+#  'figures/most_gendered_labels.png',
+#  bg="white",
+#  gcv_diff_plot,
+#  dpi = 300,
+#  width = 8,
+#  height = 6
+# )
+```
+### Unbiased GCV Labels
+
+We also identify GCV labels for which the difference in conditional probabilities between women and men is very low, which suggests that they are unbiased with respect to gender.
+```{r}
+# group by gender
+gcv_grouped <- dfm_group(gcv_dfm, groups = "gender")
+# get counts for each label, calculate probabilities
+gcv_nodiff <- textstat_keyness(gcv_grouped,  target = "Male", measure = 'chi2') %>%
+  mutate(n_all = n_target + n_reference,
+         obs_female = 110, obs_male = 430,
+         prob_female = n_reference / obs_female,
+         prob_male = n_target / obs_male,
+         prob_diff = abs(prob_female - prob_male))
+
+gcv_nodiff  <-  gcv_nodiff %>% 
+  filter(prob_diff < 0.2 & n_target > 10 & n_reference > 10)
+
+gcv_nodiff$feature
+```
+
+## Manual coding of image labels
+
+For the remainder of this document, we will focus on analysis of GCV output. To get a better understanding for what kind of labels might be biased, we manually coded all labels returned by GCV for the photographs into a smaller set of categories: 'physical trait / body', 'occpupation', 'clothing / apparel', 'color / adjective' and 'other'.
+```{r message=FALSE, warning=FALSE}
+label_cats <- read_tsv("data/imagelabels_cat_data.tsv")
+head(label_cats)
+```
+
+This code creates category counts for each photograph:
+```{r}
+labs <- label_cats %>% 
+  pull(cat) %>% set_names(label_cats$label)
+
+# function for finding labels and corresponding categories
+look_up <- function(labels) {
+  parsed <-  labels
+  for (x in seq_along(labels)) {
+    parsed[[x]] <- labs[[labels[[x]]]]
+  }
+  return(parsed %>% table() %>% as.data.frame() %>% 
+           set_names("label", "freq")) %>% spread(label, freq)
+}
+
+labels_freqs_list <- str_split(mc_df$wiki_img_labels, ", ") %>% map(look_up)
+
+# New code had to be added because the code from the original study did not work. 
+# The reason for this is unclear. The logic could be imitated nevertheless.
+
+# extract the unique categories
+categories <- unique(unlist(lapply(labels_freqs_list, function(entry) entry$label)))
+
+# creating an empty dataframe with the categories as columns
+df <- data.frame(matrix(NA, ncol = length(categories), nrow = length(labels_freqs_list)))
+colnames(df) <- categories
+
+# function to update the data frame with the frequencies
+update_dataframe <- function(entry) {
+  new_row <- rep(NA, length(categories))
+  for (i in seq_along(entry$label)) {
+    category <- as.character(entry$label[i])
+    freq <- entry$freq[i]
+    new_row[which(categories == category)] <- freq
+  }
+  return(new_row)
+}
+
+# iteration over the list entries and update of the data frame
+for (i in seq_along(labels_freqs_list)) {
+  df[i, ] <- update_dataframe(labels_freqs_list[[i]])
+}
+
+# recode entries with "na" as 0
+df <- df %>% mutate_all(~replace_na(., 0))
+
+head(df)
+
+# merge data frames
+mc_df <- bind_cols(mc_df, df)
+
+```
+
+Check distribution of target variables
+```{r warning=FALSE}
+ggplot(mc_df, aes(x = physicaltrait_body)) +
+  geom_histogram(binwidth = 1, fill = "grey", color = "black") +
+  labs(title = "Histogramm (physicaltrait_body)",
+       x = "Auftrittshäufigkeit der Labelkategorie",
+       y = "Absolute Häufigkeit") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
 ggsave(
- 'figures/fig6_replication.png',
- gcv_diff_plot,
+ 'figures/distribution_physicaltrait_body.png',
+ bg="white",
+ width = 8,
+ height = 6,
+ dpi = 300
+)
+```
+
+```{r warning=FALSE}
+ggplot(mc_df, aes(x = occupation)) +
+  geom_histogram(binwidth = 1, fill = "grey", color = "black") +
+  labs(title = "Histogramm (occupation)",
+       x = "Auftrittshäufigkeit der Labelkategorie",
+       y = "Absolute Häufigkeit") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+ggsave(
+ 'figures/distribution_occupation.png',
+ bg="white",
+ width = 8,
+ height = 6,
+ dpi = 300
+)
+```
+
+```{r warning=FALSE}
+ggplot(mc_df, aes(x = clothing_apparel)) +
+  geom_histogram(binwidth = 1, fill = "grey", color = "black") +
+  labs(title = "Histogramm (clothing_apparel)",
+       x = "Auftrittshäufigkeit der Labelkategorie",
+       y = "Absolute Häufigkeit") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+ggsave(
+ 'figures/distribution_clothing_apparel.png',
+ bg="white",
+ width = 8,
+ height = 6,
+ dpi = 300
+)
+```
+
+```{r warning=FALSE}
+ggplot(mc_df, aes(x = other)) +
+  geom_histogram(binwidth = 1, fill = "grey", color = "black") +
+  labs(title = "Histogramm (other)",
+       x = "Auftrittshäufigkeit der Labelkategorie",
+       y = "Absolute Häufigkeit") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+ggsave(
+ 'figures/distribution_other.png',
+ bg="white",
+ width = 8,
+ height = 6,
+ dpi = 300
+)
+```
+
+```{r warning=FALSE}
+ggplot(mc_df, aes(x = color_adjective)) +
+  geom_histogram(binwidth = 1, fill = "grey", color = "black") +
+  labs(title = "Histogramm (color_adjective)",
+       x = "Auftrittshäufigkeit der Labelkategorie",
+       y = "Absolute Häufigkeit") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+ggsave(
+ 'figures/distribution_color_adjective.png',
+ bg="white",
+ width = 8,
+ height = 6,
+ dpi = 300
+)
+```
+
+## Modeling Label Counts
+
+Using poisson & negative binomial regression models, we model category counts and include covariates for age, ethnicity, and party of MCs.
+```{r}
+mc_df %>% count(ethnicity, sort = TRUE)
+```
+
+Due to the skewed distribution we only differentiate between "White" and "Non-White" for ethnicity.
+```{r message=FALSE, warning=FALSE}
+mc_df_reg <- mc_df %>% filter(party != "Independent") %>% 
+                   mutate(gender = as.factor(gender),
+                          party = as.factor(party),
+                          eth_white = if_else(ethnicity == "white",
+                                              "White", "Non-white") %>% as.factor())
+# poisson regressions
+apparel <- glm(clothing_apparel ~ gender + eth_white + party + age,
+               data = mc_df_reg,
+               family = poisson())
+physical <-  glm(physicaltrait_body ~ gender + eth_white  + party  + age,
+                 data = mc_df_reg,
+                 family = poisson())
+occupation <- glm(occupation ~ gender + eth_white + party  + age,
+                  data = mc_df_reg,
+                  family = poisson())
+color_adjective <- glm(color_adjective ~ gender + eth_white + party  + age,
+                       data = mc_df_reg,
+                       family = poisson())
+other <- glm(other ~ gender + ethnicity + party  + age,
+             data = mc_df_reg,  family = poisson())
+
+```
+
+```{r}
+eth_white_table <- table(mc_df_reg$eth_white)
+prop.table(eth_white_table) * 100
+```
+
+Check choice of poisson distribution
+
+Set seed = 42 to ensure reproducibility
+```{r}
+set.seed(42)
+qqnorm(qresid(physical),
+       main = "Q-Q Plot (physicaltrait_body)",
+       xlab = "Theoretische Quantile",
+       ylab = "Beobachtete Quantile");
+qqline(qresid(physical), col="red")
+```
+
+```{r}
+set.seed(42)
+qqnorm(qresid(occupation),
+       main = "Q-Q Plot (occupation)",
+       xlab = "Theoretische Quantile",
+       ylab = "Beobachtete Quantile");
+qqline(qresid(occupation), col="red")
+```
+
+```{r}
+set.seed(42)
+qqnorm(qresid(apparel),
+       main = "Q-Q Plot (clothing_apparel)",
+       xlab = "Theoretische Quantile",
+       ylab = "Beobachtete Quantile");
+qqline(qresid(apparel), col="red")
+```
+
+```{r}
+set.seed(42)
+qqnorm(qresid(other),
+       main = "Q-Q Plot (other)",
+       xlab = "Theoretische Quantile",
+       ylab = "Beobachtete Quantile");
+qqline(qresid(other), col="red")
+```
+
+```{r}
+set.seed(42)
+qqnorm(qresid(color_adjective),
+       main = "Q-Q Plot (color_adjective)",
+       xlab = "Theoretische Quantile",
+       ylab = "Beobachtete Quantile");
+qqline(qresid(color_adjective), col="red")
+```
+
+Get overview of poisson regression models
+```{r}
+summary(apparel)
+summary(physical)
+summary(occupation)
+summary(color_adjective)
+summary(other)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# dispersion tests
+dispersiontest(apparel, trafo = 1)
+dispersiontest(physical, trafo = 1)
+dispersiontest(occupation, trafo = 1)
+dispersiontest(color_adjective, trafo = 1)
+dispersiontest(other, trafo = 1)
+
+# run negative binomials instead of poisson due to partial overdisperson
+apparel <- glm.nb(clothing_apparel ~ gender + eth_white + party  + age,
+                  data = mc_df_reg)
+
+physical <- glm.nb(physicaltrait_body ~ gender + eth_white + party  + age,
+                   data = mc_df_reg)
+occupation <- glm.nb(occupation ~ gender + eth_white + party  + age,
+                     data = mc_df_reg)
+color_adjective <- glm.nb(color_adjective ~ gender + eth_white + party  + age,
+                          data = mc_df_reg)
+other <- glm.nb(other ~ gender + eth_white + party  + age,
+                data = mc_df_reg)
+```
+
+Get overview of negative binomial regression models
+```{r}
+summary(apparel)
+summary(physical)
+summary(occupation)
+summary(color_adjective)
+summary(other)
+```
+
+Now we combine all estimates and visualize effect estimates for different covariates, while holding other respective covariates at their observed values.
+```{r warning=FALSE}
+pred_apparel <- ggeffect(apparel) 
+pred_apparel$age <- pred_apparel$age %>% mutate(x = as.character(x))
+pred_apparel <- pred_apparel %>% plyr::ldply(., data.frame) %>%
+  mutate(cat = "clothing / apparel")
+
+pred_physical <- ggeffect(physical) 
+pred_physical$age <- pred_physical$age %>% mutate(x = as.character(x))
+pred_physical <- pred_physical %>% plyr::ldply(., data.frame) %>%
+  mutate(cat = "physical trait / body")
+
+
+pred_occupation <- ggeffect(occupation)
+pred_occupation$age <- pred_occupation$age %>% mutate(x = as.character(x))
+pred_occupation <- pred_occupation %>% plyr::ldply(., data.frame) %>%
+  mutate(cat = "occupation")
+
+
+pred_color <- ggeffect(color_adjective)
+pred_color$age <- pred_color$age %>% mutate(x = as.character(x))
+pred_color <- pred_color %>% plyr::ldply(., data.frame) %>%
+  mutate(cat = "color / adjective")
+
+
+pred_other <- ggeffect(other)
+pred_other$age <- pred_other$age %>% mutate(x = as.character(x))
+pred_other <- pred_other %>% plyr::ldply(., data.frame) %>%
+  mutate(cat = "other")
+
+all_preds = list(pred_apparel,
+                 pred_physical,
+                 pred_occupation,
+                 pred_color,
+                 pred_other) %>% 
+  plyr::ldply(., data.frame) %>%
+  rename(label = x, indicator = group)
+```
+
+The following code creates the average predicted category counts conditional on gender: 
+```{r fig.height=6, fig.width=8, warning=FALSE}
+# individual lateral spacing for each category
+nudge_values <- c(c(-0.3, 0.3), c(0, 0), c(0, 0), c(-0.1, 1.2), c(-0.4, 0.9))
+
+all_preds %>% 
+  filter(indicator == "gender") %>%  
+  ggplot(aes(
+    x = predicted,
+    y =  reorder(cat, predicted),
+    color = label,
+    group = 1
+  )) +
+  geom_point(size = 3) +
+  scale_color_manual(values = viridis(n = 4)[c(1, 3)],
+                     name = NULL,
+                     labels = c("Frauen", "Männer"))  +
+  scale_x_continuous(limits = c(0, 9)) +
+  geom_errorbarh(aes(
+    xmin = conf.low,
+    xmax = conf.high,
+    height = 0.15
+  ), size = 0.75) +
+geom_text(aes(label = paste(round(predicted, 2), " ", "(", round(conf.low, 2) , ", ", round(conf.high, 2), ")", sep = "")), 
+            vjust = -1.2, size = 3, position = position_nudge(x = nudge_values)) +   
+  #  scale_shape_manual(values=c(19, 15))+
+  scale_y_discrete(
+    limits = c(
+      "color / adjective",
+      "other",
+      "clothing / apparel",
+      "occupation",
+      "physical trait / body"
+    )
+  ) +
+  labs(x = "Vorausgesagte Anzahl von Labels nach Geschlecht (mit 95%-Konfidenzintervall)",
+       y = "label category",
+       color = "gender") +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.box.background = element_rect(colour = "grey80"),
+    legend.text = element_text(size = 10),
+    axis.text.x = element_text(angle = 0),
+    axis.text.y = element_text(size = 12),
+    strip.text.x = element_text(size = 12),
+    axis.title.y = element_blank(),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.caption = element_text(size = 9, face = "italic")
+  )  
+
+ggsave(
+ 'figures/predicted_category_counts.png',
+ bg="white",
  dpi = 300,
  width = 8,
  height = 6
 )
 ```
+
+## Biases in Image Labels of Tweets by MCs
+
+Now, we turn to our dataset of images within tweets posted by MCs. We start with the subset for which we validated image labels with crowdworkers. In the crowd validation dataset each row represents the validation of one particular image label. Note that we only consider labels (and recognized objects) with GCV confidence scores of at least .75.
+```{r}
+crowd_df <- read_tsv("data/crowdvalidation_data.tsv")
+head(crowd_df)
+```
+
+### GCV confidence versus respondent's checking the box
+
+We examine to what extent GCV's confidence scores are in line with human judgment about whether image labels are correct.
+```{r}
+# vector of tresholds from .75 confidence to .1 confidence
+conf_ths <- seq(0.75, 1, 0.02)
+
+# function for treshold lookup
+check_treshold <- function(th, data) {
+  data <- data %>% filter(!is.na(confidence) & confidence >= th)
+  share_corr <- sum(data$labelresponse) / nrow(data)
+  return (tibble(
+    treshold = th,
+    correct = share_corr,
+    obs = nrow(data)
+  ))
+  
+}
+
+#apply functions
+conf_dfs <- tibble()
+for (th in seq_along(conf_ths)) {
+  conf_dfs <- bind_rows(conf_dfs, check_treshold(conf_ths[th], crowd_df))
+}
+
+```
+
+The following graph visualizes the results:
+```{r fig.height=6, fig.width=8, message=FALSE, warning=FALSE}
+
+conf_dfs %>% ggplot(aes(treshold, correct))  +
+  geom_point(size = 4, color = '#404788FF') +
+  geom_line(color = '#404788FF', size = 1.5) +
+  scale_x_continuous(breaks = pretty_breaks(n = 7),
+                     limits = c(0.70, NA)) +
+  
+  scale_y_continuous(breaks = pretty_breaks(n = 7),
+                     limits = c(0.70, 1.0)) +
+  geom_abline(intercept = 0,
+              slope = 1,
+              linetype = 2) +
+  geom_text(
+    aes(label = paste0('(', comma(obs), ')')),
+    nudge_x = 0.015,
+    nudge_y = -0.004,
+    size = 3
+  ) +
+  labs(x = "Konfidenzniveau von Google Cloud Vision",
+       y = "Anteil der Zustimmung unter den befragten Personen")
+
+
+# ggsave(
+#  'figures/confidence_human_agreement.png',
+#  bg="white",
+#  width = 8,
+#  height = 6,
+#  dpi = 300
+# )
+```
+
+# Replication
+
+## Data collection
+Data collection via Google Cloud Vision API <br>
+Using an API key for Google Cloud Vision, the politician images can be passed to GCV's interface for processing. In response, we receive a dataset with labels for all 540 images.
+```{r}
+# Preparations to use Google Cloud Vision API
+# store & hide GCV API key in .Renviron file
+#usethis::edit_r_environ()
+```
+
+```{r}
+# API key set as environment variable
+Sys.setenv(gvision_key = Sys.getenv('GCV_key'))
+```
+
+```{r}
+# initialization function 
+gvision_init()
+```
+
+```{r}
+# get list of paths to the images
+filenames_women <- list.files(path = "mc_images_split/mc_women", 
+                        pattern="*.jpg", 
+                        full.names = TRUE)
+head(filenames_women)
+```
+
+```{r}
+# get list of paths to the images
+filenames_men <- list.files(path = "mc_images_split/mc_men", 
+                        pattern="*.jpg", 
+                        full.names = TRUE)
+head(filenames_men)
+```
+
+```{r eval=FALSE}
+# get image annotations
+# Send post request to GCV-API
+results_women <- get_annotations(images = filenames_women,  # image character vector
+                           features = 'label',              # request all available features
+                           max_res = 25,                    # maximum number of results per feature
+                           mode = 'local')                  # determine image type
+
+img_data_women <- parse_annotations(results_women)          # returns list of data frames
+names(img_data_women)                                       # all available features
+
+results_men <- get_annotations(images = filenames_men,      # image character vector
+                           features = 'label',              # request all available features
+                           max_res = 25,                    # maximum number of results per feature
+                           mode = 'local')                  # determine image type
+
+img_data_men <- parse_annotations(results_men)              # returns list of data frames
+names(img_data_men)                                         # all available features
+```
+
+```{r eval=FALSE}
+# get all labels
+img_labels_women <- img_data_women$labels
+head(img_labels_women)
+
+img_labels_men <- img_data_men$labels
+head(img_labels_men)
+```
+
+```{r eval=FALSE}
+# save data
+write.csv(img_labels_women, 
+          file = "data_replication/imgrec_women_23.csv", 
+          row.names = F)
+```
+
+```{r eval=FALSE}
+# save data
+write.csv(img_labels_men, 
+          file = "data_replication/imgrec_men_23.csv", 
+          row.names = F)
+```
+
+## Data preparation
+
+```{r}
+# import collected data for more detailed analysis
+df_women <- read.csv('data_replication/imgrec_women_23.csv', encoding='utf-8')
+df_men   <- read.csv('data_replication/imgrec_men_23.csv', encoding='utf-8')
+```
+
+```{r}
+# bring replication labels in same format as original
+df_women <- df_women %>% 
+  mutate(description = gsub("\\s", "_", description))
+
+df_men <- df_men %>% 
+  mutate(description = gsub("\\s", "_", description))
+```
+
+```{r}
+df_total <- full_join(df_women, df_men)
+dim(df_total)
+
+# Number of labels for each person/image
+12380/540
+```
+
+```{r}
+# get unique labels for manual coding of categories
+unique_labels <- unique(df_total$description)
+summary(unique_labels)
+str(unique_labels)
+```
+
+```{r}
+# prepare csv-format of unique labels for manual coding
+df_unique_labels <- data.frame(labels = unique_labels)
+write.csv(df_unique_labels, 
+          file = "data_replication/labels_manual_coding.csv",
+          row.names = FALSE)
+```
+
+```{r}
+df_total_desc <- aggregate(description ~ img_id, data = df_total, FUN = c)
+df_total_score <- aggregate(score ~ img_id, data = df_total, FUN = c)
+
+df_total <- merge(df_total_desc, df_total_score, by = "img_id", all = TRUE)
+dim(df_total)
+```
+
+```{r}
+# recode description and score
+df_total$description <- sapply(df_total$description, paste, collapse = ", ")
+df_total$score<- sapply(df_total$score, paste, collapse = ", ")
+```
+
+```{r}
+# regular expression to get clean wikipedia id
+df_total <- df_total %>% 
+  mutate(wikipedia_id = str_remove(str_extract(img_id, "(?<=/)[^/]+$"), "\\.jpg$"))
+```
+
+```{r}
+# merge original and replication data
+# select only relevant columns
+mc_df_selected <- mc_df[, c("wikipedia_id",
+                            "wiki_img_url",
+                            "name", "age",
+                            "gender",
+                            "ethnicity",
+                            "type",
+                            "party",
+                            "state",
+                            "wiki_img_labels",
+                            "wiki_img_labelsconf",
+                            "clothing_apparel",
+                            "color_adjective",
+                            "occupation",
+                            "other",
+                            "physicaltrait_body")]
+
+df_total_selected <- df_total[, c("description",
+                                  "score",
+                                  "wikipedia_id")]
+
+merged_df <- merge(mc_df_selected, df_total_selected, by = "wikipedia_id")
+
+# rename variables oriented to the original
+merged_df <- merged_df %>% rename(wiki_img_labels_repl = description, wiki_img_labelsconf_repl = score)
+
+dim(merged_df)
+```
+
+## Annotation examples
+
+### GCV Example
+
+```{r fig.height=5.3, fig.width=8, message=FALSE, warning=FALSE}
+# filtering and reshaping data
+img_example1 <-
+  merged_df %>% filter(str_detect(wiki_img_url, 'Steve_Daines|Lucille_Roybal')) %>%
+  mutate(label = str_split(wiki_img_labels_repl, ', '),
+         score = str_split(wiki_img_labelsconf_repl, ', ')) %>%
+  unnest(c(label, score)) %>%
+  mutate(score = round(as.numeric(score), 2)) %>%
+  group_by(name) %>%
+  mutate(pixel = score * 200) %>% # for visulization purposes
+  dplyr::select(name, gender, party, label, score, pixel, wiki_img_url)
+
+# creating plot
+daines <-
+  image_read('mc_images/Steve_Daines.jpg') %>% 
+  image_ggplot() +
+  
+  geom_label_repel(
+    data = img_example1 %>% filter(name == 'Steve Daines'),
+    aes(
+      y = pixel - 90 ,
+      x =  110,
+      label = str_c(label, ': ', percent(score, accuracy = 2))
+    ),
+    direction = 'both',
+    force = 20,
+    segment.alpha = 0.00,
+    size = 5,
+    alpha = 0.75,
+    seed = 2
+  ) + guides(size = FALSE)  
+
+
+# creating plot
+allard <- image_read('mc_images/Lucille_Roybal-Allard.jpg') %>%
+  image_ggplot() +
+  
+  geom_label_repel(
+    data = img_example1 %>% filter(name == 'Lucille Roybal-Allard'),
+    aes(
+      y = pixel - 90 ,
+      x =  90,
+      label = str_c(label, ': ', percent(score,  accuracy = 2))
+    ),
+    direction = 'both',
+    force = 5,
+    segment.alpha = 0.00,
+    size = 5,
+    alpha = 0.75,
+    seed = 1337
+  ) + guides(size = FALSE)
+
+# combining plots
+comb1 <- cowplot::plot_grid(daines, allard, labels = NULL)
+comb1
+
+# ggsave(
+#  'figures/example_annotations_repl.png',
+#  comb1,
+#  dpi = 300,
+#  width = 8,
+#  height = 5.3
+# )
+```
+
+## Image labels - key differences
+
+Next, we quantify key differences in labels by gender for each image recognition service. We only consider labels that were assigned at least 5 times across all images.
+```{r}
+gcv_dfm <- corpus(merged_df,
+                  text_field = 'wiki_img_labels_repl',
+                  docid_field = 'wikipedia_id') %>%
+  dfm(remove_punct = TRUE) %>% 
+  dfm_trim(min_termfreq = 5)
+
+dim(gcv_dfm)
+```
+
+We create a function to examine group differences based on Chi² tests. 
+```{r}
+key_diff <- function(featmat, groups, 
+                     groups1_name,
+                     groups2_name,
+                     group1_obs, group2_obs) {
+  # grouping
+  img_grouped <- dfm_group(featmat, groups = groups)
+  
+  
+  # compute key labels for group 1
+  key1 <- textstat_keyness(img_grouped,  target = groups1_name, measure = 'chi2')
+  group_key1 <-
+  key1 %>% mutate(
+    groups = if_else(chi2 >= 0, groups1_name, groups2_name),
+    key = groups1_name,
+    chi2_abs = abs(chi2),
+    obs_total = group1_obs
+  ) %>%
+  group_by(groups) %>% top_n(n = 25, wt = chi2_abs) %>% ungroup()
+
+  # compute key labels for group 2
+  key2 <- textstat_keyness(img_grouped,  target = groups2_name, measure = 'chi2')
+  group_key2 <-
+  key2 %>% mutate(
+    groups = if_else(chi2 >= 0, groups2_name, groups1_name),
+    key = groups2_name,
+    chi2_abs = abs(chi2),
+    obs_total = group2_obs
+  ) %>%
+  group_by(groups) %>% top_n(n = 25, wt = chi2_abs) %>% ungroup()
+  
+  
+  # combine data and add frequency indicators
+comb_key <- group_key1 %>% bind_rows(group_key2) %>%
+  mutate(sum_feat = n_target + n_reference,
+    rel_feat =  n_target / sum_feat,
+    rel_total =  n_target / obs_total,
+    feature = str_replace_all(feature, '_', ' ') %>% 
+              str_trim() %>% 
+              reorder_within(sum_feat, groups))
+
+return(comb_key)
+
+}
+```
+
+
+### GCV
+
+25 most gendered labels:
+```{r fig.height=6, fig.width=8}
+# apply function
+gcv_diff <- key_diff(gcv_dfm, groups = "gender", groups1_name = "Female",
+         groups2_name = "Male", group1_obs = 110, group2_obs = 430)
+
+# visualize results
+gcv_diff_plot <- gcv_diff %>%
+  ggplot(aes(x = feature, rel_total, fill = key)) +
+  geom_bar(stat = "identity", position = "dodge")  +
+  coord_flip() +
+  facet_wrap(ifelse(groups == "Male", "Häufigste Labels,\nBilder von Männern",
+                    "Häufigste Labels,\nBilder von Frauen") ~ .,
+              scales = 'free_y')  +
+  
+  scale_x_reordered() +
+  scale_y_continuous(labels = scales::label_percent(suffix = ""),
+                     breaks = pretty_breaks(n = 5)) +
+  
+  scale_fill_manual(
+    values = viridis(n = 4)[c(1, 3)],
+    name = "Relative Anteil der Labels nach Geschlecht in Prozent",
+    labels = c("Frauen", "Männer")
+  )  +
+  labs(x = '',
+       y = '') + 
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.box.background = element_rect(colour = "grey80"),
+    legend.text = element_text(size = 10),
+    axis.text.x = element_text(angle = 0),
+    axis.text.y = element_text(size = 10),
+    strip.text.x = element_text(size = 12),
+    axis.title.y = element_blank())
+
+gcv_diff_plot
+
+# ggsave(
+#  'figures/most_gendered_labels_repl.png',
+#  gcv_diff_plot,
+#  bg="white",
+#  dpi = 300,
+#  width = 8,
+#  height = 6
+# )
+```
+
+### Unbiased GCV Labels
+
+We also identify GCV labels for which the difference in conditional probabilities between women and men is very low, which suggests that they are unbiased with respect to gender.
+```{r}
+# group by gender
+gcv_grouped <- dfm_group(gcv_dfm, groups = "gender")
+# get counts for each label, calculate probabilities
+gcv_nodiff <- textstat_keyness(gcv_grouped,  target = "Male", measure = 'chi2') %>%
+  mutate(n_all = n_target + n_reference,
+         obs_female = 110, obs_male = 430,
+         prob_female = n_reference / obs_female,
+         prob_male = n_target / obs_male,
+         prob_diff = abs(prob_female - prob_male))
+
+gcv_nodiff  <-  gcv_nodiff %>% 
+  filter(prob_diff < 0.2 & n_target > 10 & n_reference > 10)
+
+gcv_nodiff$feature
+```
+
+## Manual coding of image labels
+
+```{r}
+# import hand coded labels from two raters for intercoder reliability
+hand_coded_labels_rater_1 <- read_csv("data_replication/labels_manual_coded_rater_1.csv")
+
+hand_coded_labels_rater_2 <- read_csv("data_replication/labels_manual_coded_rater_2.csv")
+
+head(hand_coded_labels_rater_1, 5)
+head(hand_coded_labels_rater_2, 5)
+```
+
+```{r, include = FALSE, eval = FALSE}
+# table for supplementary material
+stargazer(hand_coded_labels_rater_1, summary = FALSE, rownames = FALSE,
+          type = "html", out = "figures/table_labels_repl.html") 
+```
+
+```{r}
+# calculate cohens kappa
+kappa_statistics <- CohenKappa(hand_coded_labels_rater_1$cat, 
+                    hand_coded_labels_rater_2$cat, 
+                    weight="Unweighted")
+
+kappa_statistics
+```
+
+Agreement Measures
+
+Values between 0 and 1 describing the relative strength of agreement associated with kappa statistics according to the authors Landis & Koch (1977: 165).
+
+0.41-0.60 = "Moderate" <br>
+0.61-0.80 = "Substantial"<br>
+0.81-1.00 = "Almost Perfekt"
+
+Landis, J. Richard; Koch, Gary G. (1977): The measurement of observer agreement for categorical data. In: Biometrics 33 (1), S. 159–174.
+
+
+Use hand coded labels from main rater for creating label counts.
+This code creates category counts for each photograph:
+```{r}
+labs <- hand_coded_labels_rater_1 %>% 
+  pull(cat) %>% set_names(hand_coded_labels_rater_1$label)
+
+# function for finding labels and corresponding categories
+look_up <- function(labels) {
+  parsed <-  labels
+  for (x in seq_along(labels)) {
+    parsed[[x]] <- labs[[labels[[x]]]]
+  }
+  return(parsed %>% table() %>% as.data.frame() %>% 
+           set_names("label", "freq")) %>% spread(label, freq)
+}
+
+labels_freqs_list <- str_split(merged_df$wiki_img_labels_repl, ", ") %>% map(look_up)
+
+# New code had to be added because the code from the original study did not work. 
+# The reason for this is unclear. The logic could be imitated nevertheless.
+
+# extract the unique categories
+categories <- unique(unlist(lapply(labels_freqs_list, function(entry) entry$label)))
+
+# creating an empty dataframe with the categories as columns
+df <- data.frame(matrix(NA, ncol = length(categories), nrow = length(labels_freqs_list)))
+colnames(df) <- categories
+
+# function to update the data frame with the frequencies
+update_dataframe <- function(entry) {
+  new_row <- rep(NA, length(categories))
+  for (i in seq_along(entry$label)) {
+    category <- as.character(entry$label[i])
+    freq <- entry$freq[i]
+    new_row[which(categories == category)] <- freq
+  }
+  return(new_row)
+}
+
+# iteration over the list entries and update of the data frame
+for (i in seq_along(labels_freqs_list)) {
+  df[i, ] <- update_dataframe(labels_freqs_list[[i]])
+}
+
+# recode entries with "na" as 0
+df <- df %>% mutate_all(~replace_na(., 0))
+
+# renaming the variable names because of replication data
+colnames(df) <- paste(colnames(df), "_repl", sep = "")
+
+head(df)
+
+# merge data frames
+merged_df <- bind_cols(merged_df, df)
+
+```
+
+Check distribution of target variables
+```{r warning=FALSE}
+ggplot(merged_df, aes(x = physicaltrait_body_repl)) +
+  geom_histogram(binwidth = 1, fill = "grey", color = "black") +
+  labs(title = "Histogramm (physicaltrait_body_repl)",
+       x = "Auftrittshäufigkeit der Labelkategorie",
+       y = "Absolute Häufigkeit") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+ggsave(
+ 'figures/distribution_physicaltrait_body_repl.png',
+ bg="white",
+ width = 8,
+ height = 6,
+ dpi = 300
+)
+```
+
+```{r warning=FALSE}
+ggplot(merged_df, aes(x = occupation_repl)) +
+  geom_histogram(binwidth = 1, fill = "grey", color = "black") +
+  labs(title = "Histogramm (occupation_repl)",
+       x = "Auftrittshäufigkeit der Labelkategorie",
+       y = "Absolute Häufigkeit") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+ggsave(
+ 'figures/distribution_occupation_repl.png',
+ bg="white",
+ width = 8,
+ height = 6,
+ dpi = 300
+)
+```
+
+```{r warning=FALSE}
+ggplot(merged_df, aes(x = clothing_apparel_repl)) +
+  geom_histogram(binwidth = 1, fill = "grey", color = "black") +
+  labs(title = "Histogramm (clothing_apparel_repl)",
+       x = "Auftrittshäufigkeit der Labelkategorie",
+       y = "Absolute Häufigkeit") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+ggsave(
+ 'figures/distribution_clothing_apparel_repl.png',
+ bg="white",
+ width = 8,
+ height = 6,
+ dpi = 300
+)
+```
+
+```{r warning=FALSE}
+ggplot(merged_df, aes(x = other_repl)) +
+  geom_histogram(binwidth = 1, fill = "grey", color = "black") +
+  labs(title = "Histogramm (other_repl)",
+       x = "Auftrittshäufigkeit der Labelkategorie",
+       y = "Absolute Häufigkeit") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+ggsave(
+ 'figures/distribution_other_repl.png',
+ bg="white",
+ width = 8,
+ height = 6,
+ dpi = 300
+)
+```
+
+```{r warning=FALSE}
+ggplot(merged_df, aes(x = color_adjective_repl)) +
+  geom_histogram(binwidth = 1, fill = "grey", color = "black") +
+  labs(title = "Histogramm (color_adjective_repl)",
+       x = "Auftrittshäufigkeit der Labelkategorie",
+       y = "Absolute Häufigkeit") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+ggsave(
+ 'figures/distribution_color_adjective_repl.png',
+ bg="white",
+ width = 8,
+ height = 6,
+ dpi = 300
+)
+```
+
+## Modeling Label Counts
+
+Using poisson & negative binomial regression models, we model category counts and include covariates for age, ethnicity, and party of MCs.
+```{r}
+# count for descriptive analysis
+mc_df %>% count(ethnicity, sort = TRUE)
+```
+
+Due to the skewed distribution we only differentiate between "White" and "Non-White" for ethnicity.
+```{r message=FALSE, warning=FALSE}
+mc_df_reg <- merged_df %>% filter(party != "Independent") %>% 
+                   mutate(gender = as.factor(gender),
+                          party = as.factor(party),
+                          eth_white = if_else(ethnicity == "white",
+                                              "White", "Non-white") %>% as.factor())
+# poisson regressions
+apparel_poi_repl <- glm(clothing_apparel_repl ~ gender + eth_white + party + age,
+                       data = mc_df_reg,
+                       family = poisson())
+physical_poi_repl <-  glm(physicaltrait_body_repl ~ gender + eth_white  + party  + age,
+                       data = mc_df_reg,
+                       family = poisson())
+occupation_poi_repl <- glm(occupation_repl ~ gender + eth_white + party  + age,
+                        data = mc_df_reg,
+                        family = poisson())
+color_adjective_poi_repl <- glm(color_adjective_repl ~ gender + eth_white + party  + age,
+                       data = mc_df_reg,
+                       family = poisson())
+# unlike the original, "ethnicity" has been replaced by "eth_white"
+other_poi_repl <- glm(other_repl ~ gender + eth_white + party  + age,
+                       data = mc_df_reg,
+                       family = poisson())
+
+```
+
+Check choice of poisson distribution
+
+Set seed = 42 to ensure reproducibility
+```{r}
+set.seed(42)
+qqnorm(qresid(physical_poi_repl),
+       main = "Q-Q Plot (physicaltrait_body_repl)",
+       xlab = "Theoretische Quantile",
+       ylab = "Beobachtete Quantile");
+qqline(qresid(physical_poi_repl), col="red")
+```
+
+```{r}
+set.seed(42)
+qqnorm(qresid(occupation_poi_repl),
+       main = "Q-Q Plot (occupation_repl)",
+       xlab = "Theoretische Quantile",
+       ylab = "Beobachtete Quantile");
+qqline(qresid(occupation_poi_repl), col="red")
+```
+
+```{r}
+set.seed(42)
+qqnorm(qresid(apparel_poi_repl),
+       main = "Q-Q Plot (clothing_apparel_repl)",
+       xlab = "Theoretische Quantile",
+       ylab = "Beobachtete Quantile");
+qqline(qresid(apparel_poi_repl), col="red")
+```
+
+```{r}
+set.seed(42)
+qqnorm(qresid(other_poi_repl),
+       main = "Q-Q Plot (other_repl)",
+       xlab = "Theoretische Quantile",
+       ylab = "Beobachtete Quantile");
+qqline(qresid(other_poi_repl), col="red")
+```
+
+```{r}
+set.seed(42)
+qqnorm(qresid(color_adjective_poi_repl),
+       main = "Q-Q Plot (color_adjective_repl)",
+       xlab = "Theoretische Quantile",
+       ylab = "Beobachtete Quantile");
+qqline(qresid(color_adjective_poi_repl), col="red")
+```
+
+Get overview of poisson regression models
+```{r}
+summary(apparel_poi_repl)
+summary(physical_poi_repl)
+summary(occupation_poi_repl)
+summary(color_adjective_poi_repl)
+summary(other_poi_repl)
+```
+
+```{r message=FALSE, warning=FALSE}
+# dispersion tests
+dispersiontest(apparel_poi_repl, trafo = 1)
+dispersiontest(physical_poi_repl, trafo = 1)
+dispersiontest(occupation_poi_repl, trafo = 1)
+dispersiontest(color_adjective_poi_repl, trafo = 1)
+dispersiontest(other_poi_repl, trafo = 1)
+
+# run negative binomials instead of poisson due to partial overdisperson
+apparel_nb_repl <- glm.nb(clothing_apparel_repl ~ gender + eth_white + party  + age,
+                  data = mc_df_reg)
+
+physical_nb_repl <- glm.nb(physicaltrait_body_repl ~ gender + eth_white + party  + age,
+                   data = mc_df_reg)
+
+occupation_nb_repl <- glm.nb(occupation_repl ~ gender + eth_white + party  + age,
+                     data = mc_df_reg)
+
+color_adjective_nb_repl <- glm.nb(color_adjective_repl ~ gender + eth_white + party  + age,
+                          data = mc_df_reg)
+
+other_nb_repl <- glm.nb(other_repl ~ gender + eth_white + party  + age,
+                data = mc_df_reg)
+```
+
+Get overview of negative binomial regression models
+```{r}
+summary(apparel_nb_repl)
+summary(physical_nb_repl)
+summary(occupation_nb_repl)
+summary(color_adjective_nb_repl)
+summary(other_nb_repl)
+```
+
+Now we combine all estimates and visualize effect estimates for different covariates, while holding other respective covariates at their observed values.
+```{r warning=FALSE}
+pred_apparel <- ggeffect(apparel_poi_repl) 
+pred_apparel$age <- pred_apparel$age %>% mutate(x = as.character(x))
+pred_apparel <- pred_apparel %>% plyr::ldply(., data.frame) %>%
+  mutate(cat = "clothing / apparel")
+
+pred_physical <- ggeffect(physical_nb_repl) 
+pred_physical$age <- pred_physical$age %>% mutate(x = as.character(x))
+pred_physical <- pred_physical %>% plyr::ldply(., data.frame) %>%
+  mutate(cat = "physical trait / body")
+
+
+pred_occupation <- ggeffect(occupation_poi_repl)
+pred_occupation$age <- pred_occupation$age %>% mutate(x = as.character(x))
+pred_occupation <- pred_occupation %>% plyr::ldply(., data.frame) %>%
+  mutate(cat = "occupation")
+
+
+pred_color <- ggeffect(color_adjective_poi_repl)
+pred_color$age <- pred_color$age %>% mutate(x = as.character(x))
+pred_color <- pred_color %>% plyr::ldply(., data.frame) %>%
+  mutate(cat = "color / adjective")
+
+
+pred_other <- ggeffect(other_poi_repl)
+pred_other$age <- pred_other$age %>% mutate(x = as.character(x))
+pred_other <- pred_other %>% plyr::ldply(., data.frame) %>%
+  mutate(cat = "other")
+
+all_preds = list(pred_apparel,
+                 pred_physical,
+                 pred_occupation,
+                 pred_color,
+                 pred_other) %>% 
+  plyr::ldply(., data.frame) %>%
+  rename(label = x, indicator = group)
+```
+
+The following code creates the average predicted category counts conditional on gender: 
+```{r fig.height=6, fig.width=8, warning=FALSE}
+# individual lateral spacing for each category
+nudge_values <- c(c(-0.5, 0.3), c(0, 0), c(0, 0), c(0.6, -0.2), c(-0.5, 1))
+
+all_preds %>% 
+  filter(indicator == "gender") %>%  
+  ggplot(aes(
+    x = predicted,
+    y =  reorder(cat, predicted),
+    color = label,
+    group = 1
+  )) +
+  geom_point(size = 3) +
+  scale_color_manual(values = viridis(n = 4)[c(1, 3)],
+                     name = NULL,
+                     labels = c("Frauen", "Männer"))  +
+  scale_x_continuous(limits = c(0, 9)) +
+  geom_errorbarh(aes(
+    xmin = conf.low,
+    xmax = conf.high,
+    height = 0.15
+  ), size = 0.75) +
+geom_text(aes(label = paste(round(predicted, 2), " ", "(", round(conf.low, 2) , ", ", round(conf.high, 2), ")", sep = "")), 
+            vjust = -1.2, size = 3, position = position_nudge(x = nudge_values)) +   
+  #  scale_shape_manual(values=c(19, 15))+
+  scale_y_discrete(
+    limits = c(
+      "color / adjective",
+      "other",
+      "clothing / apparel",
+      "occupation",
+      "physical trait / body"
+    )
+  ) +
+  labs(x = "Vorausgesagte Anzahl von Labels nach Geschlecht (mit 95%-Konfidenzintervall)", y = "label category",
+       color = "gender") +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.box.background = element_rect(colour = "grey80"),
+    legend.text = element_text(size = 10),
+    axis.text.x = element_text(angle = 0),
+    axis.text.y = element_text(size = 12),
+    strip.text.x = element_text(size = 12),
+    axis.title.y = element_blank(),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.caption = element_text(size = 9, face = "italic")
+  )  
+
+ggsave(
+ 'figures/predicted_category_counts_repl.png',
+ bg="white",
+ dpi = 300,
+ width = 8,
+ height = 6
+)
+```
+
+```{r eval=FALSE}
+# get well formatted regression tables
+# select the appropriate model in each case
+
+# original
+stargazer(physical, occupation, apparel, other, color_adjective,
+          style = "default",
+          model.names	= TRUE,
+          out = "tables/reg_table_original.html")
+
+# replication
+stargazer(physical_nb_repl, occupation_poi_repl, apparel_poi_repl, other_poi_repl, color_adjective_poi_repl,
+          style = "default",
+          out = "tables/reg_table_repl.html")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
